@@ -180,3 +180,9 @@ dist
 
 __pycache__
 models/*
+
+output
+output_g4b2/*
+output_g4b*/*
+models
+bengali_speech_dataset
