@@ -12,7 +12,7 @@ import os
 import re
 import random
 import time
-from typing import List, Dict, Optional, Literal
+from typing import List, Dict, Optional, Literal, Callable
 from dotenv import load_dotenv
 
 from environment_simulator import Environment, EnvironmentSimulator
@@ -25,7 +25,7 @@ Backend = Literal["gemini", "gemma", "auto"]
 class ConversationGenerator:
     def __init__(
         self,
-        backend: Backend = "auto",
+        backend: Backend = "gemma",
         bn_ratio: float = 0.8,
         # Gemini settings
         gemini_api_key: Optional[str] = None,
@@ -34,9 +34,14 @@ class ConversationGenerator:
         gemma_base_url: Optional[str] = None,
         gemma_api_key: Optional[str] = None,
         gemma_model: Optional[str] = None,
+        debug: bool = False,
     ):
         self.backend = backend
         self.bn_ratio = bn_ratio  # 0.0 = all English, 1.0 = all Bengali
+        self.debug = debug
+
+        if not 0.0 <= self.bn_ratio <= 1.0:
+            raise ValueError(f"bn_ratio must be in [0.0, 1.0], got {self.bn_ratio}")
 
         # --- Gemini config ---
         self.gemini_api_key = gemini_api_key or os.getenv("GEMINI_API_KEY", "")
@@ -52,9 +57,9 @@ class ConversationGenerator:
                 print(f"  Warning: Could not initialise Gemini client: {e}")
 
         # --- Gemma (local) config ---
-        self.gemma_base_url = gemma_base_url or os.getenv("GEMMA_BASE_URL", "http://0.0.0.0:8000/v1")
-        self.gemma_api_key = gemma_api_key or os.getenv("GEMMA_API_KEY", "not-needed")
-        self.gemma_model = gemma_model or os.getenv(
+        self.gemma_base_url = os.getenv("GEMMA_BASE_URL", "http://0.0.0.0:8000/v1")
+        self.gemma_api_key = os.getenv("GEMMA_API_KEY", "not-needed")
+        self.gemma_model = os.getenv(
             "GEMMA_MODEL",
             "./models/gemma-3-27b-it-GGUF/gemma-3-27b-it-Q6_K.gguf",
         )
@@ -69,6 +74,11 @@ class ConversationGenerator:
                 print(f"  Warning: Could not initialise Gemma client: {e}")
 
         print(f"ConversationGenerator ready  [backend={self.backend}, bn_ratio={self.bn_ratio}]")
+
+    def _log(self, message: str, debug_only: bool = False) -> None:
+        if debug_only and not self.debug:
+            return
+        print(message)
 
     def _call_gemini(
         self,
@@ -108,16 +118,17 @@ class ConversationGenerator:
             if text:
                 return self._clean_output(text)
         except Exception as e:
-            print(f"  Gemini call failed: {e}")
+            self._log(f"  Gemini call failed: {e}", debug_only=True)
         return None
 
     def _call_gemma(
         self,
         messages: List[Dict[str, str]],
-        temperature: float = 0.85,
-        max_tokens: int = 1024,
+        temperature: float = 0.0,
+        max_tokens: int = 4096,
     ) -> Optional[str]:
         """Call local Gemma via OpenAI-compatible API."""
+        
         if not self.gemma_client:
             return None
         try:
@@ -126,22 +137,21 @@ class ConversationGenerator:
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                top_p=0.92,
-                frequency_penalty=0.25,
-                presence_penalty=0.25,
+                stream=False,
+                # extra_body={"reasoning": {"enabled": False}}
             )
             text = response.choices[0].message.content
             if text:
                 return self._clean_output(text)
         except Exception as e:
-            print(f"  Gemma call failed: {e}")
+            self._log(f"  Gemma call failed: {e}", debug_only=True)
         return None
 
     def _call_llm(
         self,
         messages: List[Dict[str, str]],
-        temperature: float = 0.85,
-        max_tokens: int = 1024,
+        temperature: float = 0.0,
+        max_tokens: int = 4096,
         retries: int = 2,
     ) -> Optional[str]:
         """
@@ -159,13 +169,13 @@ class ConversationGenerator:
                     return result
                 # Gemini failed — if auto, immediately try Gemma
                 if self.backend == "auto":
-                    print(f"  → Gemini failed, falling back to local Gemma")
+                    self._log("  → Gemini failed, falling back to local Gemma", debug_only=True)
                     result = self._call_gemma(messages, temperature, max_tokens)
                     if result:
                         return result
-                    print(f"  Both backends failed (attempt {attempt + 1}/{retries})")
+                    self._log(f"  Both backends failed (attempt {attempt + 1}/{retries})", debug_only=True)
                 else:
-                    print(f"  Gemini attempt {attempt + 1}/{retries} returned nothing")
+                    self._log(f"  Gemini attempt {attempt + 1}/{retries} returned nothing", debug_only=True)
                 time.sleep(2)
                 continue
 
@@ -174,7 +184,7 @@ class ConversationGenerator:
                 result = self._call_gemma(messages, temperature, max_tokens)
                 if result:
                     return result
-                print(f"  Gemma attempt {attempt + 1}/{retries} returned nothing")
+                self._log(f"  Gemma attempt {attempt + 1}/{retries} returned nothing", debug_only=True)
                 time.sleep(2)
 
         return None
@@ -315,7 +325,10 @@ class ConversationGenerator:
         language = self._pick_language()
         conversation_history: List[Dict[str, str]] = []
 
-        print(f"\n  Generating conversation: env={env.name}, lang={language}, topic='{topic[:50]}…', turns={num_turns}")
+        self._log(
+            f"\n  Generating conversation: env={env.name}, lang={language}, topic='{topic[:50]}…', turns={num_turns}",
+            debug_only=True,
+        )
 
         for turn_idx in range(num_turns):
             # --- User turn ---
@@ -335,7 +348,7 @@ class ConversationGenerator:
                     user_msg = f"Hi, I have a question about: {topic}"
 
             conversation_history.append({"role": "user", "content": user_msg})
-            print(f"    Turn {turn_idx + 1} [USER]: {user_msg[:80]}…")
+            self._log(f"    Turn {turn_idx + 1} [USER]: {user_msg[:80]}…", debug_only=True)
 
             # --- Assistant turn ---
             assistant_msg = self._generate_assistant_turn(
@@ -347,10 +360,10 @@ class ConversationGenerator:
                 assistant_msg = "I'd be happy to help with that! Could you tell me a bit more about what you need?"
             
             conversation_history.append({"role": "assistant", "content": assistant_msg})
-            print(f"    Turn {turn_idx + 1} [ASST]: {assistant_msg[:80]}…")
+            self._log(f"    Turn {turn_idx + 1} [ASST]: {assistant_msg[:80]}…", debug_only=True)
 
         if len(conversation_history) < 2:
-            print("  ⚠ Conversation too short, discarding.")
+            self._log("  ⚠ Conversation too short, discarding.")
             return None
 
         return {
@@ -369,7 +382,7 @@ class ConversationGenerator:
         env_sim: EnvironmentSimulator,
         conversations_per_env: int = 5,
         environments: Optional[List[str]] = None,
-        save_callback: Optional[callable] = None,
+        save_callback: Optional[Callable[[List[Dict]], None]] = None,
         save_every: int = 10,
     ) -> List[Dict]:
         """

@@ -1,4 +1,5 @@
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import sys
 import time
@@ -57,21 +58,64 @@ def main():
     parser = argparse.ArgumentParser(
         description="Generate synthetic multi-turn dialogue dataset"
     )
-    parser.add_argument("--per-env", type=int, default=100)
+    parser.add_argument("--per-env", type=int, default=400)
     parser.add_argument("--envs", nargs="*", default=None)
     parser.add_argument("--output-dir", type=str, default="./output")
     parser.add_argument(
         "--backend",
         choices=["gemini", "gemma", "auto"],
-        default="auto",
+        default="gemma",
     )
     parser.add_argument(
         "--bn-ratio",
         type=float,
-        default=0.8,
-        help="Ratio of Bengali conversations (0.0=all English, 1.0=all Bengali). Default: 0.8",
+        default=1.0,
+        help="Ratio of Bengali conversations (0.0=all English, 1.0=all Bengali). Default: 1.0",
+    )
+    parser.add_argument(
+        "--min-turns",
+        type=int,
+        default=1,
+        help="Global minimum turn-pairs for all environments (overrides per-environment values).",
+    )
+    parser.add_argument(
+        "--max-turns",
+        type=int,
+        default=3,
+        help="Global maximum turn-pairs for all environments (overrides per-environment values).",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable verbose per-turn debug logs (model outputs and backend retry details).",
+    )
+    parser.add_argument(
+        "--env-workers",
+        type=int,
+        default=1,
+        help="Number of parallel workers across environments. Default: 1 (sequential).",
     )
     args = parser.parse_args()
+
+    if not 0.0 <= args.bn_ratio <= 1.0:
+        print("  ERROR: --bn-ratio must be between 0.0 and 1.0")
+        sys.exit(1)
+
+    if args.min_turns is not None and args.min_turns < 1:
+        print("  ERROR: --min-turns must be >= 1")
+        sys.exit(1)
+
+    if args.max_turns is not None and args.max_turns < 1:
+        print("  ERROR: --max-turns must be >= 1")
+        sys.exit(1)
+
+    if args.min_turns is not None and args.max_turns is not None and args.min_turns > args.max_turns:
+        print("  ERROR: --min-turns cannot be greater than --max-turns")
+        sys.exit(1)
+
+    if args.env_workers < 1:
+        print("  ERROR: --env-workers must be >= 1")
+        sys.exit(1)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = Path(args.output_dir)
@@ -83,12 +127,29 @@ def main():
     print(f"  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'#'*60}\n")
 
-    env_sim = EnvironmentSimulator()
-    generator = ConversationGenerator(backend=args.backend, bn_ratio=args.bn_ratio)
+    env_sim = EnvironmentSimulator(
+        default_min_turns=args.min_turns,
+        default_max_turns=args.max_turns,
+    )
 
     env_names = args.envs or env_sim.list_environments()
+    sample_env = next(iter(env_sim.environments.values()))
+    has_global_turn_override = (
+        env_sim.default_min_turns is not None or env_sim.default_max_turns is not None
+    )
+
     print(f"  Backend       : {args.backend}")
+    print(f"  Debug logs    : {'ON' if args.debug else 'OFF'}")
+    print(f"  Env workers   : {args.env_workers}")
     print(f"  BN ratio      : {args.bn_ratio:.0%} Bengali / {1 - args.bn_ratio:.0%} English")
+    if has_global_turn_override:
+        print(
+            "  Turn range    : "
+            f"{sample_env.min_turns}-{sample_env.max_turns} "
+            "(global override from CLI/.env)"
+        )
+    else:
+        print("  Turn range    : per-environment defaults")
     print(f"  Environments  : {', '.join(env_names)}")
     print(f"  Per env       : {args.per_env}")
     print(f"  Total planned : {len(env_names) * args.per_env} conversations")
@@ -100,17 +161,46 @@ def main():
             print(f"  ERROR: Unknown environment '{name}'. Available: {available}")
             sys.exit(1)
 
-    def _incremental_save(convos: List[Dict]):
-        save_json(convos, output_path)
+    def _generate_one_environment(env_name: str) -> List[Dict]:
+        local_generator = ConversationGenerator(
+            backend=args.backend,
+            bn_ratio=args.bn_ratio,
+            debug=args.debug,
+        )
+        return local_generator.generate_batch(
+            env_sim=env_sim,
+            conversations_per_env=args.per_env,
+            environments=[env_name],
+            save_callback=None,
+            save_every=10,
+        )
 
     start_time = time.time()
-    conversations = generator.generate_batch(
-        env_sim=env_sim,
-        conversations_per_env=args.per_env,
-        environments=env_names,
-        save_callback=_incremental_save,
-        save_every=10,
-    )
+    conversations: List[Dict] = []
+    max_workers = min(args.env_workers, len(env_names))
+
+    if max_workers == 1:
+        for env_name in env_names:
+            conversations.extend(_generate_one_environment(env_name))
+    else:
+        print(f"  Running {len(env_names)} environments with {max_workers} parallel workers...\n")
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_env = {
+                executor.submit(_generate_one_environment, env_name): env_name
+                for env_name in env_names
+            }
+            for future in as_completed(future_to_env):
+                env_name = future_to_env[future]
+                try:
+                    env_conversations = future.result()
+                    conversations.extend(env_conversations)
+                    print(
+                        f"  ✓ Environment '{env_name}' complete: "
+                        f"{len(env_conversations)} conversations"
+                    )
+                except Exception as exc:
+                    print(f"  ✗ Environment '{env_name}' failed: {exc}")
+
     elapsed = time.time() - start_time
 
     if not conversations:

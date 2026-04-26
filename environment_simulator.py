@@ -1,3 +1,5 @@
+import copy
+import os
 import random
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional
@@ -12,8 +14,8 @@ class Environment:
     system_prompt: str
     example_topics: List[str]
     user_personas: List[str] = field(default_factory=list)
-    min_turns: int = 3
-    max_turns: int = 8
+    min_turns: int = 1
+    max_turns: int = 3
 
     def get_random_topic(self) -> str:
         return random.choice(self.example_topics)
@@ -57,8 +59,8 @@ ELEMENTARY_TEACHER_ASSISTANT = Environment(
         "a young student who is curious but easily confused",
         "a parent who wants simple explanations they can relay to their child",
     ],
-    min_turns=3,
-    max_turns=7,
+    min_turns=1,
+    max_turns=3,
 )
 
 HEALTHCARE_ADVISOR = Environment(
@@ -95,8 +97,8 @@ HEALTHCARE_ADVISOR = Environment(
         "a busy professional who has been neglecting their health",
         "someone who prefers natural remedies and home care",
     ],
-    min_turns=3,
-    max_turns=8,
+    min_turns=1,
+    max_turns=3,
 )
 
 CASUAL_CONVERSATION = Environment(
@@ -133,8 +135,8 @@ CASUAL_CONVERSATION = Environment(
         "a friendly person who loves sharing stories",
         "someone exploring new hobbies and interests",
     ],
-    min_turns=3,
-    max_turns=7,
+    min_turns=1,
+    max_turns=3,
 )
 
 TECH_SUPPORT = Environment(
@@ -173,8 +175,8 @@ TECH_SUPPORT = Environment(
         "a student whose laptop is giving them problems before a deadline",
         "someone who just bought a new device and needs help setting it up",
     ],
-    min_turns=3,
-    max_turns=8,
+    min_turns=1,
+    max_turns=3,
 )
 
 FITNESS_COACH = Environment(
@@ -213,8 +215,8 @@ FITNESS_COACH = Environment(
         "someone recovering from an injury wanting safe exercises",
         "a teenager wanting to get fit for a sport",
     ],
-    min_turns=3,
-    max_turns=7,
+    min_turns=1,
+    max_turns=3,
 )
 
 CREATIVE_WRITING_HELPER = Environment(
@@ -252,8 +254,8 @@ CREATIVE_WRITING_HELPER = Environment(
         "a person who wants to write poetry but feels unsure",
         "a parent wanting to write a bedtime story for their child",
     ],
-    min_turns=3,
-    max_turns=7,
+    min_turns=1,
+    max_turns=3,
 )
 
 ALL_ENVIRONMENTS: Dict[str, Environment] = {
@@ -266,11 +268,51 @@ ALL_ENVIRONMENTS: Dict[str, Environment] = {
 }
 
 
+def _read_int_env(var_name: str) -> Optional[int]:
+    """Read an integer env var if present, otherwise return None."""
+    value = os.getenv(var_name)
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise ValueError(f"Environment variable {var_name} must be an integer, got: {value}") from exc
+
+
 class EnvironmentSimulator:
     """Manages environments and generates scenario-specific prompts."""
 
-    def __init__(self, environments: Optional[Dict[str, Environment]] = None):
-        self.environments = environments or ALL_ENVIRONMENTS
+    def __init__(
+        self,
+        environments: Optional[Dict[str, Environment]] = None,
+        default_min_turns: Optional[int] = None,
+        default_max_turns: Optional[int] = None,
+    ):
+        # Deep copy prevents accidental mutation of module-level defaults.
+        self.environments = copy.deepcopy(environments or ALL_ENVIRONMENTS)
+
+        env_min = _read_int_env("GLOBAL_MIN_TURNS")
+        env_max = _read_int_env("GLOBAL_MAX_TURNS")
+        self.default_min_turns = default_min_turns if default_min_turns is not None else env_min
+        self.default_max_turns = default_max_turns if default_max_turns is not None else env_max
+
+        if self.default_min_turns is not None and self.default_min_turns < 1:
+            raise ValueError("default_min_turns must be >= 1")
+        if self.default_max_turns is not None and self.default_max_turns < 1:
+            raise ValueError("default_max_turns must be >= 1")
+
+        effective_min = self.default_min_turns
+        effective_max = self.default_max_turns
+        if effective_min is not None and effective_max is not None and effective_min > effective_max:
+            raise ValueError(
+                f"Invalid turn override: min_turns ({effective_min}) cannot be greater than max_turns ({effective_max})"
+            )
+
+        for env in self.environments.values():
+            if effective_min is not None:
+                env.min_turns = effective_min
+            if effective_max is not None:
+                env.max_turns = effective_max
 
     def list_environments(self) -> List[str]:
         """Return available environment names."""
