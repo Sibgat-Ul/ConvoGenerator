@@ -186,3 +186,8 @@ output_g4b2/*
 output_g4b*/*
 models
 bengali_speech_dataset
+bengali_annoted_ds
+NaiveSTS
+shard_*.json
+to_transcript.json
+generated_completions.json

@@ -12,7 +12,7 @@ from huggingface_hub import login, HfApi
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Configuration
-TTS_SERVER_URL = "http://100.127.142.47:8000"
+TTS_SERVER_URL = "http://10.102.35.206:8000"
 OUTPUT_DIR = "./bengali_speech_dataset"
 WAV_DIR = os.path.join(OUTPUT_DIR, "wav")
 METADATA_FILE = os.path.join(OUTPUT_DIR, "metadata.jsonl")
@@ -340,8 +340,7 @@ def validate_audio_paths_in_metadata(metadata_entries: List[dict]) -> bool:
 def upload_to_huggingface(dataset_name: str):
     """Upload dataset folder (wav + metadata files) to Hugging Face dataset repo."""
     try:
-        # Login using HF_TOKEN environment variable
-        hf_token = os.getenv("HF_TOKEN")
+        hf_token = os.getenv("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")
         if not hf_token:
             print("⚠ HF_TOKEN not set. Skipping Hugging Face upload.")
             return
